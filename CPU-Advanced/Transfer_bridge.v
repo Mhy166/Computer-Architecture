@@ -4,27 +4,43 @@ module Transfer_bridge(
     input               aclk,
     input               aresetn,
     
-     //CPU 指令SRAM接口
-    input               inst_req,
-    input               inst_wr,
-    input   [ 1:0]      inst_size,
-    input   [31:0]      inst_addr,
-    input   [ 3:0]      inst_wstrb,
-    input   [31:0]      inst_wdata,
-    output              inst_addr_ok,
-    output              inst_data_ok,
-    output  [31:0]      inst_rdata,
+    input            i_rd_req,
+    input [1:0]      i_rd_type,
+    input [31:0]     i_rd_addr,
+    output           i_rd_rdy,
+    output           i_ret_valid,
+    output           i_ret_last,
+    output [31:0]    i_ret_data,
 
-    //CPU 数据SRAM接口
-    input               data_req,
-    input               data_wr,
-    input   [ 1:0]      data_size,
-    input   [31:0]      data_addr,
-    input   [31:0]      data_wdata,
-    input   [ 3:0]      data_wstrb,
-    output              data_addr_ok,
-    output              data_data_ok,
-    output  [31:0]      data_rdata,
+    // axi bridge, write channel
+    input           i_wr_req,
+    input [2:0]     i_wr_type,
+    input [31:0]    i_wr_addr,
+    input [3:0]     i_wr_wstrb,
+    input [127:0]   i_wr_data,
+    output          i_wr_rdy,
+    //额外
+    input           i_uncache_store,
+    output          i_bvalid,
+    
+    input            d_rd_req,
+    input [1:0]      d_rd_type,
+    input [31:0]     d_rd_addr,
+    output           d_rd_rdy,
+    output           d_ret_valid,
+    output           d_ret_last,
+    output [31:0]    d_ret_data,
+
+    // axi bridge, write channel
+    input           d_wr_req,
+    input [2:0]     d_wr_type,
+    input [31:0]    d_wr_addr,
+    input [3:0]     d_wr_wstrb,
+    input [127:0]   d_wr_data,
+    output          d_wr_rdy,
+    //额外
+    input           d_uncache_store,
+    output          d_bvalid,
     
     //读请求
     output  [ 3:0]      arid,
@@ -75,315 +91,237 @@ module Transfer_bridge(
 parameter INST_ID = 4'h0;
 parameter DATA_ID = 4'h1;
 
-//教材上建议信号锁定
-assign arlen = 8'b00000000;
-assign arburst = 2'b01;
-assign arlock  = 2'b00;
-assign arcache = 2'b00;
-assign arprot  = 2'b00;
-//读响应里 rresp rlast 忽略信号
-assign awid  = DATA_ID;
-assign awlen = 8'b00000000;
-assign awburst = 2'b01;
-assign awlock  = 2'b00;
-assign awcache = 2'b00;
-assign awprot  = 2'b00; 
-assign wid = DATA_ID;
-assign wlast = 4'b0001;
-//写响应里 bid bresp 忽略信号
+assign i_bvalid = bvalid;
+assign d_bvalid = bvalid;
+assign i_wr_rdy = 1'b1;
+//AXI方向 
+//读请求
+assign arlen = 8'd3;//每次读，传输一行cache！
+assign arburst = 2'b01;//突发传输，免握手
+assign arlock = 2'b00;//固定
+assign arcache = 4'd0;//固定
+assign arprot = 3'd0;//固定
 
-//控制逻辑--读请求
-
-//寄存器保存状态！状态机运转
-reg         arvalid_r;
-reg  [ 3:0] arid_r;
-reg  [31:0] araddr_r;
-reg  [ 2:0] arsize_r;
-
-assign arvalid  = arvalid_r;
-assign arid     = arid_r;
-assign araddr   = araddr_r;
-assign arsize   = arsize_r;
-
-//在这个响应通道上
-wire r_data_ok;//读数据的OK信号
-wire r_inst_ok;
-wire [31:0] r_data;
-
-//写请求+写数据
-reg         awvalid_r;
-reg  [31:0] awaddr_r;
-reg  [ 2:0] awsize_r;
-reg         wvalid_r;
-reg  [31:0] wdata_r;
-reg  [ 3:0] wstrb_r;
-
-assign awvalid  = awvalid_r;
-assign wvalid   = wvalid_r;
-assign awaddr   = awaddr_r;
-assign awsize   = awsize_r;
-assign wdata    = wdata_r;
-assign wstrb    = wstrb_r;
-
-//在写响应上
-wire        b_ok;
-
-//指的是CPU是否准备好
-wire        cpu_inst_read_ready;
-wire        cpu_data_read_ready;
-wire        cpu_data_write_ready;
-
-assign cpu_inst_read_ready = 1;
-assign cpu_data_read_ready = !data_req_record_empty && !data_req_record_output[32];
-assign cpu_data_write_ready= !data_req_record_empty && data_req_record_output[32];
-//CPU写数据！这个计数缓存其实存的是响应！
-    wire        write_req_valid;
-    wire [31:0] write_req_addr;
-    wire [ 2:0] write_req_size;
-    wire [31:0] write_req_data;
-    wire [ 3:0] write_req_strb;
+wire inst_read_req_valid;
+wire data_read_req_valid;
+wire read_req_valid;
+assign inst_read_req_valid = !data_read_req_valid && i_rd_req && i_rd_rdy;
+assign data_read_req_valid = d_rd_req && d_rd_rdy;
+assign read_req_valid = inst_read_req_valid||data_read_req_valid;
+    reg [3:0] arid_r;
+    always @(posedge aclk ) begin
+        if (~aresetn) 
+            arid_r <= 4'b0;
+        else if (inst_read_req_valid)
+            arid_r <= 4'b0;
+        else if (data_read_req_valid)
+            arid_r <= 4'b1;
+    end
+    assign arid = arid_r;
+//读请求通道begin
+    //读请求的addr和size
+    reg [31:0] araddr_r;
+    always @(posedge aclk ) begin
+        if (~aresetn) 
+            araddr_r <= 32'b0;
+        else if (inst_read_req_valid)//读请求有效 
+            araddr_r <= i_rd_addr;
+        else if (data_read_req_valid)
+            araddr_r <= d_rd_addr;
+    end
+    assign araddr = araddr_r;
     
-    wire        write_data_resp_wen;
-    wire        write_data_resp_ren;
-    wire        write_data_resp_empty;
-    wire        write_data_resp_full;
+    reg [31:0] arsize_r;
+    always @(posedge aclk ) begin
+        if (~aresetn) 
+            arsize_r <= 32'b0;
+        else if (inst_read_req_valid)//读请求有效 
+            arsize_r <= {1'b0,i_rd_type};
+        else if (data_read_req_valid)
+            arsize_r <= {1'b0,d_rd_type};
+    end
+    assign arsize = arsize_r;
+    //读请求的valid
+    reg arvalid_r;
+    always @(posedge aclk ) begin
+        if (~aresetn) begin
+            arvalid_r <= 1'b0;
+        end
+        else if (read_req_valid) begin
+            arvalid_r <= 1'b1;
+        end
+        else if (arvalid && arready) begin//握手成功
+            arvalid_r <= 1'b0;
+        end
+    end
+    assign arvalid = arvalid_r && !((araddr_r == awaddr_r) && axi_write_state != 2'd0);
+//读请求通道end
+
+//读响应begin
+    assign d_ret_last = rlast;
+    assign i_ret_last = rlast;
+    assign d_rd_rdy = 1'b1;
+    assign i_rd_rdy = 1'b1&&!d_rd_req;
+    assign d_ret_data = rdata; 
+    assign i_ret_data = rdata;
     
-    wire        data_write_valid;
-    
-    assign b_ok = bvalid&&bready;//写响应通道已经弄好
-    assign bready = !write_data_resp_full;
-    
-    assign write_req_valid      = data_write_valid;
-    //来自CPU的SRAM接口的
-    assign write_req_addr       = data_addr;
-    assign write_req_size       = data_size;
-    assign write_req_data       = data_wdata;
-    assign write_req_strb       = data_wstrb;
-   
-    fifo_only_count #(
-        .BUFF_DEPTH     (6),
-        .ADDR_WIDTH     (3)
-    ) write_data_resp_count (
-        .clk            (aclk),
-        .resetn         (aresetn),
-        .wen            (write_data_resp_wen),
-        .ren            (write_data_resp_ren),
-        .empty          (write_data_resp_empty),
-        .full           (write_data_resp_full)
-    );
-    assign write_data_resp_ren = cpu_data_write_ready;
-    assign write_data_resp_wen = b_ok;
+    assign d_ret_valid = (rid == 1'b1)? rvalid:1'b0;
+    assign i_ret_valid = (rid == 1'b0)? rvalid:1'b0;
+    assign rready = 1'b1;//始终准备好传输
+//读响应end
+
+assign awid = 4'd1; //写请求，只能取数
+assign awlen = uncache_store_r ? 8'd0 : 8'd3; 
+assign awburst = 2'b01; 
+assign awlock = 2'b0;
+assign awcache = 4'b0;
+assign awprot = 3'b0;
+assign wid = 4'b1;
+//写的最后一拍
+assign wlast = uncache_store_r ? 1'b1 : (write_buf_counter == 3'd3);
+
+//允许CPU写数据
+reg    d_wr_rdy_r;
+always @(posedge aclk) begin
+    if (!aresetn) begin
+        d_wr_rdy_r <= 1'b1;
+    end
+    else if (d_wr_rdy && d_wr_req) begin//来请求了，就不允许了
+        d_wr_rdy_r <= 1'b0;
+    end
+    else if (write_buf_counter == 3'd3 && wready && wvalid && !uncache_store_r || uncache_store_r && wready && wvalid) begin
+        d_wr_rdy_r <= 1'b1;
+    end
+end
+assign d_wr_rdy = d_wr_rdy_r && axi_write_state == 2'd0; 
 
 
+//写状态机
+wire write_request_valid;
+assign write_request_valid = d_wr_req && d_wr_rdy;
 
-//CPU读数据，需要对方写到缓存中，我再读走
-//读响应通道的从方实际上是这两个缓存！这个时候  缓存  准备好读了！
-//读缓存都不满！就可以准备好！
-    assign rready = !read_inst_resp_full && !read_data_resp_full;
-    assign r_data_ok = rvalid && rready && rid == DATA_ID;
-    assign r_inst_ok = rvalid && rready && rid == INST_ID;
-    assign r_data    = rdata;
-//读数据的缓存--begin
-    wire        read_data_resp_wen;
-    wire        read_data_resp_ren;
-    wire        read_data_resp_empty;
-    wire        read_data_resp_full;
-    wire [31:0] read_data_resp_input;
-    wire [31:0] read_data_resp_output;
-    fifo_buffer #(
-        .DATA_WIDTH     (32),
-        .BUFF_DEPTH     (6),
-        .ADDR_WIDTH     (3)
-    ) read_data_resp_buff (
-        .clk            (aclk),
-        .resetn         (aresetn),
-        .wen            (read_data_resp_wen),
-        .ren            (read_data_resp_ren),
-        .empty          (read_data_resp_empty),
-        .full           (read_data_resp_full),
-        .input_data     (read_data_resp_input),
-        .output_data    (read_data_resp_output)
-    );
-    //CPU从缓存读来了数据，但是这只是数据
-    assign read_data_resp_ren = cpu_data_read_ready;
-    assign data_rdata = read_data_resp_output; 
-    //这里表示数据是否有效！缓存不能空呀！
-    assign data_data_ok = 
-        (cpu_data_read_ready && !read_data_resp_empty) || 
-        (cpu_data_write_ready && !write_data_resp_empty);
-    //缓存从外部读来了数据
-    assign read_data_resp_wen = r_data_ok;//data_ok,写使能启动
-    assign read_data_resp_input = r_data;//缓存读来外部的数据，然后写入
-//读数据的缓存--end
-//读指令的缓存--begin
-    wire        read_inst_resp_wen;//I
-    wire        read_inst_resp_ren;//I
-    wire        read_inst_resp_empty;//O
-    wire        read_inst_resp_full;//O
-    wire [31:0] read_inst_resp_input;//I
-    wire [31:0] read_inst_resp_output;//O
-    fifo_buffer #(
-        .DATA_WIDTH     (32),
-        .BUFF_DEPTH     (6),
-        .ADDR_WIDTH     (3)
-    ) read_inst_resp_buff (
-        .clk            (aclk),
-        .resetn         (aresetn),
-        .wen            (read_inst_resp_wen),
-        .ren            (read_inst_resp_ren),
-        .empty          (read_inst_resp_empty),
-        .full           (read_inst_resp_full),
-        .input_data     (read_inst_resp_input),
-        .output_data    (read_inst_resp_output)
-    );
-    assign read_inst_resp_ren = cpu_inst_read_ready;
-    assign inst_rdata = read_inst_resp_output; 
-    //这里表示指令是否有效！缓存不能空呀！
-    assign inst_data_ok = cpu_inst_read_ready && !read_inst_resp_empty;
-        
-    //缓存从外部读来了数据
-    assign read_inst_resp_wen = r_inst_ok;//inst_ok,写使能启动
-    assign read_inst_resp_input = r_data;//缓存读来外部的数据，然后写入
-//读指令的缓存--end
-
-
-
-//读请求的选择信号
-wire        read_data_req_ok;
-wire        read_inst_req_ok;
-wire        read_req_sel_data;
-wire        read_req_sel_inst;
-wire        write_data_req_ok;
-
-
-assign read_inst_req_ok = read_req_sel_inst && !arvalid_r;
-assign read_data_req_ok = read_req_sel_data && !arvalid_r;
-assign write_data_req_ok = data_write_valid && !wvalid_r && !awvalid_r;
-
-assign data_addr_ok = read_data_req_ok || write_data_req_ok;
-assign inst_addr_ok = read_inst_req_ok;
-
-//读请求的信号
-wire        read_req_valid;
-wire [ 3:0] read_req_id;
-wire [31:0] read_req_addr;
-wire [ 2:0] read_req_size;
-
-//两路的有效信号
-wire        inst_read_valid;
-wire        data_read_valid;
-//数据相关信号
-wire        inst_related;
-wire        data_related; 
-
-//记录数据读写请求的缓存,存的是：该请求是读还是写，地址是什么。
-    wire        data_req_record_wen;
-    wire        data_req_record_ren;
-    wire        data_req_record_empty;
-    wire        data_req_record_full;
-    wire        data_req_record_related_1;
-    wire [32:0] data_req_record_input;      // {wr, addr}
-    wire [32:0] data_req_record_output;     // {wr, addr}
-
-//写好缓存，等外部取走
-    assign data_req_record_ren = data_data_ok;
-    
-    assign data_req_record_wen = data_req && data_addr_ok;
-    assign data_req_record_input = {data_wr, data_addr};
-    
-
-//AXI请求的构造begin
-    assign inst_related = 1'b0;
-    assign data_related = data_req_record_related_1;
-    
-    assign inst_read_valid = inst_req && !inst_wr && !inst_related;
-    assign data_read_valid = data_req && !data_wr && !data_related;
-    assign data_write_valid= data_req &&  data_wr && !data_related;
-    
-    assign read_req_sel_data = data_read_valid;
-    assign read_req_sel_inst = data_read_valid ? 1'b0:inst_read_valid;
-    
-    assign read_req_valid    = inst_read_valid || data_read_valid;
-    assign read_req_id       = read_req_sel_data ? DATA_ID : INST_ID;
-    assign read_req_addr     = read_req_sel_data ? data_addr : inst_addr;
-    assign read_req_size     = read_req_sel_data ? data_size : inst_size;
-//AXI请求的构造end
-
-fifo_buffer_valid #(
-    .DATA_WIDTH     (33),
-    .BUFF_DEPTH     (6),
-    .ADDR_WIDTH     (3),
-    .RLAT_WIDTH     (32)
-) data_req_record (
-    .clk            (aclk),
-    .resetn         (aresetn),
-    .wen            (data_req_record_wen),
-    .ren            (data_req_record_ren),
-    .empty          (data_req_record_empty),
-    .full           (data_req_record_full),
-    .related_1      (data_req_record_related_1),
-    .input_data     (data_req_record_input),
-    .output_data    (data_req_record_output),
-    .related_data_1 (data_addr)
-);
-
-
-always @ (posedge aclk) begin
-    if (!aresetn) 
+reg uncache_store_r;
+reg [3:0] uncache_wr_wstrb_r;
+always @(posedge aclk) 
+begin
+    if (write_request_valid) 
     begin
-        arvalid_r <= 1'b0;
-        arid_r   <= 4'h0;
-        araddr_r <= 32'h0;
-        arsize_r <= 3'h0;
-    end 
-    else if (!arvalid_r && read_req_valid) //读请求有效
-    begin
-        arvalid_r <= read_req_valid;
-        arid_r    <= read_req_id;
-        araddr_r  <= read_req_addr;
-        arsize_r  <= read_req_size;
-    end 
-    else if (arvalid_r && arvalid && arready) //请求通道已经握手了
-    begin
-        arvalid_r <= 1'b0;
-        arid_r   <= 4'h0;
-        araddr_r <= 32'h0;
-        arsize_r <= 3'h0;
+        uncache_store_r <= d_uncache_store;//锁存cache属性
+        uncache_wr_wstrb_r <= d_wr_wstrb;//锁存字节使能
     end
 end
 
-always @ (posedge aclk) begin
-    if (!aresetn) 
-    begin
-        awvalid_r <= 1'b0;
-        awaddr_r <= 32'h0;
-        awsize_r <= 3'h0;
-    end 
-    else if (!awvalid_r && !wvalid_r && write_req_valid) 
-    begin
-        awvalid_r <= 1'b1;
-        awaddr_r <= write_req_addr;
-        awsize_r <= write_req_size;
-    end 
-    else if (awvalid_r && awvalid && awready) begin
-        awvalid_r <= 1'b0;
-        awaddr_r <= 32'h0;
-        awsize_r <= 3'h0;
+reg [1:0] axi_write_state;
+always @(posedge aclk ) begin
+    if (~aresetn) begin//初始状态0
+        axi_write_state <= 2'b0;
     end
+    else if ((axi_write_state == 2'b0) && write_request_valid) begin//0然后来了请求，变为1
+        axi_write_state <= 2'd1;
+    end
+    else if ((axi_write_state == 2'd1) && awvalid && awready && !(wvalid && wready && wlast)) 
+    begin//非最后一个
+        axi_write_state <= 2'd2;
+    end
+    else if ((axi_write_state == 2'd1) && awvalid && awready && wvalid && wready && wlast) 
+    begin//最后一个写好了
+        axi_write_state <= 2'd3;
+    end
+    else if ((axi_write_state == 2'd2) && wvalid && wready && wlast) begin
+        axi_write_state <= 2'd3;
+    end
+    else if ((axi_write_state == 2'd3) && (bvalid && bready)) begin
+        axi_write_state <= 2'd0;
+    end
+end
+//写请求begin
+    reg [31:0] awaddr_r;
+    always @(posedge aclk ) begin
+        if (~aresetn) begin
+            awaddr_r <= 32'b0;
+        end
+        else if (write_request_valid) begin
+            awaddr_r <= d_wr_addr;
+        end
+    end
+    assign awaddr = awaddr_r;
+    assign awsize = 3'b010;
     
+    reg awvalid_r;
+    always @(posedge aclk ) begin
+        if (~aresetn) begin
+            awvalid_r <= 1'b0;
+        end
+        else if (write_request_valid) begin
+            awvalid_r <= 1'b1;
+        end
+        else if (awvalid && awready) begin
+            awvalid_r <= 1'b0;
+        end
+    end
+    assign awvalid = awvalid_r;
+//写请求end
+
+//写数据begin
+    assign wdata = uncache_store_r ? write_buf[31:0] : 
+                   {{32{write_buf_counter == 3'd0}} & write_buf[ 31: 0]} |
+                   {{32{write_buf_counter == 3'd1}} & write_buf[ 63:32]} |
+                   {{32{write_buf_counter == 3'd2}} & write_buf[ 95:64]} |
+                   {{32{write_buf_counter == 3'd3}} & write_buf[127:96]};
+    
+    assign wstrb = uncache_store_r ? uncache_wr_wstrb_r : 4'b1111;
+    
+    reg wvalid_r;
+    always @(posedge aclk) begin
+        if (~aresetn) begin
+            wvalid_r <= 4'b0;
+        end
+        else if (axi_write_state == 2'd2) begin
+            wvalid_r <= 1'b1;
+        end
+        else if (wvalid && wready) begin
+            wvalid_r <= 1'b0;
+        end
+    end
+    assign wvalid = wvalid_r;
+//写数据end
+
+//写响应begin
+    reg bready_r;
+    always @(posedge aclk) begin
+        if (~aresetn) begin
+            bready_r <= 4'b0;
+        end
+        else if (axi_write_state == 2'd3) begin
+            bready_r <= 1'b1;
+        end
+        else if (bvalid && bready) begin
+            bready_r <= 1'b0;
+        end
+    end
+    assign bready = bready_r;
+//写响应end
+
+//写缓冲区
+reg [127:0] write_buf;
+always @(posedge aclk) begin
+    if (write_request_valid) 
+        write_buf <= d_wr_data;
+end
+
+reg [2:0] write_buf_counter;
+always @(posedge aclk) begin
     if (!aresetn) begin
-        wvalid_r  <= 1'b0;
-        wdata_r  <= 32'h0;
-        wstrb_r  <= 4'h0;
-    end 
-    else if (!awvalid_r && !wvalid_r && write_req_valid) begin
-        wvalid_r  <= 1'b1;
-        wdata_r  <= write_req_data;
-        wstrb_r  <= write_req_strb;
-    end else if (wvalid_r && wvalid && wready) begin
-        wvalid_r  <= 1'b0;
-        wdata_r  <= 32'h0;
-        wstrb_r  <= 4'h0;
+        write_buf_counter <= 3'b0;
+    end
+    else if (uncache_store_r) begin
+        write_buf_counter <= 3'b0;
+    end
+    else if (wready && wvalid) begin 
+        write_buf_counter <= write_buf_counter + 3'b1;
+    end
+    else if (write_buf_counter == 3'd4) begin
+        write_buf_counter <= 3'b0;
     end
 end
 
